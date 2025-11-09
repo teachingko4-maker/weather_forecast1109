@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>급식 조회 (NEIS)</title>
+  <style>
+    :root{--bg:#f7f9fc;--card:#ffffff;--accent:#1677ff;--muted:#6b7280;}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", Arial; background:var(--bg); margin:0; padding:24px; color:#0f172a;}
+    .container{max-width:920px;margin:0 auto;}
+    header{display:flex;gap:16px;align-items:center;margin-bottom:18px;}
+    .logo{width:56px;height:56px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#0ea5a4);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:20px;box-shadow:0 6px 20px rgba(2,6,23,0.08);}
+    h1{font-size:20px;margin:0;}
+    p.lead{margin:4px 0 0;color:var(--muted);font-size:13px;}
+    .card{background:var(--card);padding:18px;border-radius:12px;box-shadow:0 6px 20px rgba(2,6,23,0.04);margin-bottom:16px;}
+    form.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap;}
+    input[type="date"]{padding:10px;border-radius:8px;border:1px solid #e6eef8;background:#fbfdff;font-size:14px;}
+    button{background:var(--accent);color:#fff;padding:10px 14px;border-radius:8px;border:0;font-weight:600;cursor:pointer;}
+    .note{font-size:13px;color:var(--muted);}
+    .meals{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:14px;}
+    .meal{border-radius:10px;padding:12px;background:linear-gradient(180deg,#fff,#fbfdff);border:1px solid #f1f6fb;min-height:80px;}
+    .meal h3{margin:0 0 8px;font-size:15px;}
+    .dish{font-size:14px;line-height:1.55;color:#0b1220;white-space:pre-wrap;}
+    .empty{color:var(--muted);font-size:14px;padding:6px;}
+    .meta{font-size:12px;color:var(--muted);margin-top:8px;}
+    .error{color:#b91c1c;background:#fff1f2;padding:10px;border-radius:8px;border:1px solid #fee2e2;}
+    .small{font-size:12px;color:var(--muted);}
+    footer{margin-top:18px;text-align:center;color:var(--muted);font-size:13px;}
+    a.link{color:var(--accent);text-decoration:none;}
+    @media (max-width:520px){header{flex-direction:column;align-items:flex-start}.logo{width:48px;height:48px}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">급식</div>
+      <div>
+        <h1>학교 급식 조회 (NEIS)</h1>
+        <p class="lead">학교 코드: <strong>B10 / 7061114</strong> — 날짜를 선택하면 해당 날짜의 급식(조식/중식/석식)을 보여줍니다.</p>
+      </div>
+    </header>
+
+    <section class="card" aria-label="controls">
+      <form id="form" class="controls" onsubmit="return false;">
+        <label class="small">조회할 날짜:
+          <input type="date" id="date" required />
+        </label>
+        <label class="small">학교선택:
+          <select id="school" title="학교 코드" style="padding:9px;border-radius:8px;border:1px solid #e6eef8;">
+            <option value="7061114" selected>7061114 (주어진 학교 코드)</option>
+            <!-- 필요 시 다른 학교 코드 옵션 추가 가능 -->
+          </select>
+        </label>
+        <button id="fetchBtn">급식 조회</button>
+        <div style="flex:1"></div>
+        <div class="note">참고: NEIS는 XML 응답입니다. 네트워크(CORS) 문제 발생 시 안내가 표시됩니다.</div>
+      </form>
+    </section>
+
+    <section id="resultArea" class="card" aria-live="polite">
+      <div id="status" class="small">아직 조회하지 않았습니다.</div>
+      <div id="error" style="margin-top:12px;"></div>
+      <div id="meals" class="meals" style="margin-top:12px;"></div>
+      <div id="raw" style="margin-top:12px;"></div>
+    </section>
+
+    <footer>
+      <div>API endpoint 예시: <code>https://open.neis.go.kr/hub/mealServiceDietInfo?ATPT_OFCDC_SC_CODE=B10&SD_SCHUL_CODE=7061114&MLSV_YMD=YYYYMMDD</code></div>
+    </footer>
+  </div>
+
+<script>
+(function(){
+  const dateInput = document.getElementById('date');
+  const fetchBtn = document.getElementById('fetchBtn');
+  const status = document.getElementById('status');
+  const errorBox = document.getElementById('error');
+  const mealsBox = document.getElementById('meals');
+  const rawBox = document.getElementById('raw');
+  const schoolSelect = document.getElementById('school');
+
+  // 기본값: 오늘 (브라우저 로컬)
+  const today = new Date();
+  const pad = n => n.toString().padStart(2,'0');
+  dateInput.value = `${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+
+  // 식사코드 -> 표시명 (NEIS의 MMEAL_SC_CODE 값이 1,2,3)
+  const mealNames = { "1":"조식", "2":"중식", "3":"석식" };
+
+  fetchBtn.addEventListener('click', async () => {
+    errorBox.innerHTML = '';
+    mealsBox.innerHTML = '';
+    rawBox.innerHTML = '';
+    const dateVal = dateInput.value;
+    if (!dateVal) { errorBox.innerHTML = '<div class="error">날짜를 선택하세요.</div>'; return; }
+    // YYYYMMDD 형식으로 변환
+    const y = dateVal.slice(0,4), m = dateVal.slice(5,7), d = dateVal.slice(8,10);
+    const ymd = `${y}${m}${d}`;
+    const schoolCode = schoolSelect.value;
+
+    // API URL (ATPT_OFCDC_SC_CODE=B10 고정, 사용자가 제공한 형식 따름)
+    const apiUrl = `https://open.neis.go.kr/hub/mealServiceDietInfo?ATPT_OFCDC_SC_CODE=B10&SD_SCHUL_CODE=${encodeURIComponent(schoolCode)}&MLSV_YMD=${ymd}`;
+    status.textContent = `요청 중... (${ymd})`;
+
+    try {
+      const res = await fetch(apiUrl, { method: 'GET' });
+      // 네트워크 응답 체크
+      if (!res.ok) {
+        throw new Error(`네트워크 오류: ${res.status} ${res.statusText}`);
+      }
+      const text = await res.text();
+
+      // raw 표시 (접두사 지연 표시)
+      rawBox.innerHTML = `<details><summary class="small">원본 XML 보기</summary><pre style="white-space:pre-wrap;font-size:12px;padding:8px;background:#fbfcff;border-radius:8px;margin-top:8px;max-height:300px;overflow:auto;">${escapeHtml(text)}</pre></details>`;
+
+      // XML 파싱
+      const parser = new DOMParser();
+      const xml = parser.parseFromString(text, "application/xml");
+      // 네이티브 파서 에러 체크
+      const parsererror = xml.querySelector("parsererror");
+      if (parsererror) {
+        throw new Error("XML 파싱 오류: 서버에서 받은 응답을 해석할 수 없습니다.");
+      }
+
+      // NEIS 응답 구조: mealServiceDietInfo > head + row
+      // rows: <row> ... <DDISH_NM>...</DDISH_NM> <MMEAL_SC_CODE>...</MMEAL_SC_CODE> ...
+      const rows = Array.from(xml.getElementsByTagName("row"));
+      if (rows.length === 0) {
+        // 에러 메시지 확인 (NEIS는 오류를 <RESULT>로 보낼 수 있음)
+        const resultMsg = xml.querySelector("RESULT > MSG") || xml.querySelector("RESULT > code") || xml.querySelector("RESULT");
+        const msgText = resultMsg ? (resultMsg.textContent || resultMsg.innerText) : "해당 날짜에 급식 정보가 없습니다.";
+        status.textContent = msgText;
+        mealsBox.innerHTML = `<div class="empty">${escapeHtml(msgText)}</div>`;
+        return;
+      }
+
+      // 그룹화: 식사코드별로 모으기
+      const mealsByCode = {};
+      rows.forEach(r => {
+        const mealCode = getText(r, "MMEAL_SC_CODE") || getText(r, "MMEAL_SC"); // 안전히
+        const dishRaw = getText(r, "DDISH_NM") || "";
+        // NEIS는 DDISH_NM에 <br/>로 구분된 문자열을 보냄. <br/>을 줄바꿈으로 바꿔서 보여주기
+        const dish = dishRaw.replace(/<br\s*\/?>/gi, "\n").replace(/&nbsp;/g, " ").trim();
+        if (!mealsByCode[mealCode]) mealsByCode[mealCode] = [];
+        mealsByCode[mealCode].push(dish);
+      });
+
+      // 화면에 출력
+      mealsBox.innerHTML = '';
+      // 정렬: 1,2,3 순서로 보여주기
+      ["1","2","3"].forEach(code => {
+        const container = document.createElement('div');
+        container.className = 'meal';
+        const title = mealNames[code] || `식사 ${code || ''}`;
+        container.innerHTML = `<h3>${escapeHtml(title)}</h3>`;
+        if (mealsByCode[code] && mealsByCode[code].length) {
+          // 합쳐서 표시 (중복 행이 여러개일 경우 한 줄로 이어 붙임)
+          const combined = mealsByCode[code].join("\n");
+          container.innerHTML += `<div class="dish">${escapeHtml(combined)}</div>`;
+        } else {
+          container.innerHTML += `<div class="empty">등록된 ${title} 정보가 없습니다.</div>`;
+        }
+        mealsBox.appendChild(container);
+      });
+
+      status.textContent = `조회 완료: ${ymd}`;
+    } catch (err) {
+      console.error(err);
+      // CORS 에러 검사 (fetch가 네트워크 에러로 실패하면 메시지가 일반적)
+      let msg = err.message || String(err);
+      if (msg.toLowerCase().includes('cors') || msg.toLowerCase().includes('networkerror')) {
+        msg = `요청 실패 (CORS 또는 네트워크 문제 가능). 브라우저 콘솔 확인. 대체 방법: 서버사이드 프록시 사용 또는 CORS 허용 프록시를 통해 요청하세요.`;
+      }
+      errorBox.innerHTML = `<div class="error">${escapeHtml(msg)}</div>`;
+      status.textContent = '조회 실패';
+    }
+  });
+
+  // helper: XML row에서 태그값 추출 (첫번째)
+  function getText(node, tagName){
+    const el = node.getElementsByTagName(tagName)[0];
+    return el ? (el.textContent || el.innerText || "") : "";
+  }
+
+  function escapeHtml(s){
+    return s
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'",'&#39;');
+  }
+
+})();
+</script>
+</body>
+</html>
